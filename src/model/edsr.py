@@ -42,9 +42,8 @@ class EDSR(nn.Module):
         ]
         m_body.append(conv(n_feats, n_feats, kernel_size))
 
-        # define tail module
+        # define tail module (no upsampler - input is already upscaled)
         m_tail = [
-            common.Upsampler(conv, scale, n_feats, act=False),
             conv(n_feats, args.n_colors, kernel_size)
         ]
 

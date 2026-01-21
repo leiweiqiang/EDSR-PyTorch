@@ -142,12 +142,35 @@ class SRData(data.Dataset):
                 multi=(len(self.scale) > 1),
                 input_large=self.input_large
             )
-            if not self.args.no_augment: lr, hr = common.augment(lr, hr)
+            
+            # Upscale LR to HR size using bicubic interpolation
+            lr_upscaled = common.bicubic_upsample(lr, scale)
+            
+            # Compute Canny edge map from HR ground truth
+            edge = common.compute_canny_edge(hr)
+            
+            # Add edge map to upscaled LR
+            lr_enhanced = common.add_edge_to_image(lr_upscaled, edge)
+            
+            # Apply augmentation if enabled
+            if not self.args.no_augment:
+                lr_enhanced, hr = common.augment(lr_enhanced, hr)
+            
+            return lr_enhanced, hr
         else:
             ih, iw = lr.shape[:2]
             hr = hr[0:ih * scale, 0:iw * scale]
-
-        return lr, hr
+            
+            # For testing: upsample LR to HR size
+            lr_upscaled = common.bicubic_upsample(lr, scale)
+            
+            # Compute Canny edge map from HR ground truth (same as training)
+            edge = common.compute_canny_edge(hr)
+            
+            # Add edge map to upscaled LR
+            lr_enhanced = common.add_edge_to_image(lr_upscaled, edge)
+            
+            return lr_enhanced, hr
 
     def set_scale(self, idx_scale):
         if not self.input_large:

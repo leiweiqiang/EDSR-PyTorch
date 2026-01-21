@@ -27,7 +27,20 @@ class Demo(data.Dataset):
         filename = os.path.splitext(os.path.basename(self.filelist[idx]))[0]
         lr = imageio.imread(self.filelist[idx])
         lr, = common.set_channel(lr, n_channels=self.args.n_colors)
-        lr_t, = common.np2Tensor(lr, rgb_range=self.args.rgb_range)
+        
+        # Upscale LR to HQ size using bicubic
+        scale = self.scale[self.idx_scale]
+        lr_upscaled = common.bicubic_upsample(lr, scale)
+        
+        # TODO: Load HQ edge map from provided file
+        # For now, compute edge from upscaled LR as placeholder
+        # When edge map is provided, replace this with: edge = load_edge_map(...)
+        edge = common.compute_canny_edge(lr_upscaled)
+        
+        # Add edge to upscaled LR
+        lr_enhanced = common.add_edge_to_image(lr_upscaled, edge)
+        
+        lr_t, = common.np2Tensor(lr_enhanced, rgb_range=self.args.rgb_range)
 
         return lr_t, -1, filename
 
