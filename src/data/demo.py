@@ -4,6 +4,7 @@ from data import common
 
 import numpy as np
 import imageio
+import cv2
 
 import torch
 import torch.utils.data as data
@@ -32,10 +33,37 @@ class Demo(data.Dataset):
         scale = self.scale[self.idx_scale]
         lr_upscaled = common.bicubic_upsample(lr, scale)
         
-        # TODO: Load HQ edge map from provided file
-        # For now, compute edge from upscaled LR as placeholder
-        # When edge map is provided, replace this with: edge = load_edge_map(...)
-        edge = common.compute_canny_edge(lr_upscaled)
+        if self.args.dir_edge:
+            edge_path = None
+            for ext in ('.png', '.jpg', '.jpeg'):
+                candidate = os.path.join(self.args.dir_edge, filename + ext)
+                if os.path.isfile(candidate):
+                    edge_path = candidate
+                    break
+            if edge_path is None:
+                raise FileNotFoundError(
+                    'Edge map not found for {} in {}'.format(
+                        filename, self.args.dir_edge
+                    )
+                )
+
+            edge = imageio.imread(edge_path)
+            if edge.ndim == 3 and edge.shape[2] == 3:
+                edge = cv2.cvtColor(edge, cv2.COLOR_RGB2GRAY)
+            if edge.ndim == 2:
+                edge = np.expand_dims(edge, axis=2)
+
+            target_h, target_w = lr_upscaled.shape[:2]
+            if edge.shape[0] != target_h or edge.shape[1] != target_w:
+                edge_resized = cv2.resize(
+                    edge, (target_w, target_h), interpolation=cv2.INTER_NEAREST
+                )
+                if edge_resized.ndim == 2:
+                    edge_resized = np.expand_dims(edge_resized, axis=2)
+                edge = edge_resized
+        else:
+            # Fallback: compute edge from upscaled LR
+            edge = common.compute_canny_edge(lr_upscaled)
         
         # Add edge to upscaled LR
         lr_enhanced = common.add_edge_to_image(lr_upscaled, edge)

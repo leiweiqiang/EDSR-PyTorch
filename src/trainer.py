@@ -45,9 +45,20 @@ class Trainer():
             timer_model.tic()
 
             self.optimizer.zero_grad()
-            sr = self.model(lr, 0)
-            loss = self.loss(sr, hr)
-            loss.backward()
+            if self.args.split_batch > 1:
+                total = lr.size(0)
+                split = min(self.args.split_batch, total)
+                lr_chunks = torch.chunk(lr, split, dim=0)
+                hr_chunks = torch.chunk(hr, split, dim=0)
+                for lr_chunk, hr_chunk in zip(lr_chunks, hr_chunks):
+                    scale = lr_chunk.size(0) / total
+                    sr = self.model(lr_chunk, 0)
+                    loss = self.loss(sr, hr_chunk, scale=scale)
+                    loss.backward()
+            else:
+                sr = self.model(lr, 0)
+                loss = self.loss(sr, hr)
+                loss.backward()
             if self.args.gclip > 0:
                 utils.clip_grad_value_(
                     self.model.parameters(),
@@ -86,6 +97,15 @@ class Trainer():
         for idx_data, d in enumerate(self.loader_test):
             for idx_scale, scale in enumerate(self.scale):
                 d.dataset.set_scale(idx_scale)
+                num_samples = len(d)
+                if num_samples == 0:
+                    self.ckp.write_log(
+                        '[{} x{}]\tPSNR: N/A (empty test set)'.format(
+                            d.dataset.name, scale
+                        )
+                    )
+                    continue
+
                 for lr, hr, filename in tqdm(d, ncols=80):
                     lr, hr = self.prepare(lr, hr)
                     sr = self.model(lr, idx_scale)
@@ -101,7 +121,7 @@ class Trainer():
                     if self.args.save_results:
                         self.ckp.save_results(d, filename[0], save_list, scale)
 
-                self.ckp.log[-1, idx_data, idx_scale] /= len(d)
+                self.ckp.log[-1, idx_data, idx_scale] /= num_samples
                 best = self.ckp.log.max(0)
                 self.ckp.write_log(
                     '[{} x{}]\tPSNR: {:.3f} (Best: {:.3f} @epoch {})'.format(
@@ -112,6 +132,11 @@ class Trainer():
                         best[1][idx_data, idx_scale] + 1
                     )
                 )
+
+        if len(self.loader_test) > 0:
+            best = self.ckp.log.max(0)
+        else:
+            best = (torch.zeros(1, 1), torch.zeros(1, 1, dtype=torch.long))
 
         self.ckp.write_log('Forward: {:.2f}s\n'.format(timer_test.toc()))
         self.ckp.write_log('Saving...')

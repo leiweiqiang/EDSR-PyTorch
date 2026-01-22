@@ -66,16 +66,16 @@ class Loss(nn.modules.loss._Loss):
 
         if args.load != '': self.load(ckp.dir, cpu=args.cpu)
 
-    def forward(self, sr, hr):
+    def forward(self, sr, hr, scale=1.0):
         losses = []
         for i, l in enumerate(self.loss):
             if l['function'] is not None:
                 loss = l['function'](sr, hr)
-                effective_loss = l['weight'] * loss
+                effective_loss = l['weight'] * loss * scale
                 losses.append(effective_loss)
                 self.log[-1, i] += effective_loss.item()
             elif l['type'] == 'DIS':
-                self.log[-1, i] += self.loss[i - 1]['function'].loss
+                self.log[-1, i] += self.loss[i - 1]['function'].loss * scale
 
         loss_sum = sum(losses)
         if len(self.loss) > 1:

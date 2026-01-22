@@ -23,6 +23,8 @@ parser.add_argument('--dir_data', type=str, default='../../../dataset',
                     help='dataset directory')
 parser.add_argument('--dir_demo', type=str, default='../test',
                     help='demo image directory')
+parser.add_argument('--dir_edge', type=str, default='',
+                    help='edge map directory for demo inference (optional)')
 parser.add_argument('--data_train', type=str, default='DIV2K',
                     help='train dataset name')
 parser.add_argument('--data_test', type=str, default='DIV2K',

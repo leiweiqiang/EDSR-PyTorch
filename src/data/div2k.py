@@ -19,14 +19,28 @@ class DIV2K(srdata.SRData):
 
     def _scan(self):
         names_hr, names_lr = super(DIV2K, self)._scan()
-        names_hr = names_hr[self.begin - 1:self.end]
-        names_lr = [n[self.begin - 1:self.end] for n in names_lr]
+        begin = self.begin
+        end = self.end
+        if (not self.train) and len(names_hr) < end and begin >= 801:
+            begin -= 800
+            end -= 800
+        names_hr = names_hr[begin - 1:end]
+        names_lr = [n[begin - 1:end] for n in names_lr]
 
         return names_hr, names_lr
 
     def _set_filesystem(self, dir_data):
         super(DIV2K, self)._set_filesystem(dir_data)
-        self.dir_hr = os.path.join(self.apath, 'DIV2K_train_HR')
-        self.dir_lr = os.path.join(self.apath, 'DIV2K_train_LR_bicubic')
+        if self.train:
+            hr_dir = 'DIV2K_train_HR'
+            lr_dir = 'DIV2K_train_LR_bicubic'
+        else:
+            hr_dir = 'DIV2K_valid_HR'
+            lr_dir = 'DIV2K_valid_LR_bicubic'
+            if not os.path.isdir(os.path.join(self.apath, hr_dir)):
+                hr_dir = 'DIV2K_train_HR'
+                lr_dir = 'DIV2K_train_LR_bicubic'
+        self.dir_hr = os.path.join(self.apath, hr_dir)
+        self.dir_lr = os.path.join(self.apath, lr_dir)
         if self.input_large: self.dir_lr += 'L'
 
