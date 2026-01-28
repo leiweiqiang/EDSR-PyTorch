@@ -70,8 +70,8 @@ parser.add_argument('--precision', type=str, default='single',
 
 # Quantization specifications
 parser.add_argument('--quantize', type=str, default='',
-                    choices=('', 'qat', 'ptq'),
-                    help='Enable quantization: qat (Quantization-Aware Training) or ptq (Post-Training Quantization)')
+                    choices=('', 'qat', 'ptq', 'ptq_int4'),
+                    help='Enable quantization: qat, ptq (INT8), or ptq_int4 (weight-only INT4)')
 parser.add_argument('--quantize_backend', type=str, default='fbgemm',
                     choices=('fbgemm', 'qnnpack'),
                     help='Quantization backend (fbgemm for CPU, qnnpack for mobile)')

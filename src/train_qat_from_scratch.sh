@@ -50,7 +50,7 @@ fi
 QUANTIZE_BACKEND="fbgemm"
 
 # 训练轮数（QAT 通常需要较少的轮数）
-EPOCHS=3
+EPOCHS=300
 
 # 批次大小（根据GPU内存调整）
 BATCH_SIZE=16

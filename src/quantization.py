@@ -5,6 +5,7 @@ Supports both Post-Training Quantization (PTQ) and Quantization-Aware Training (
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.ao.quantization as quantization
 from torch.ao.quantization import QConfig, QuantStub, DeQuantStub
 from torch.ao.quantization.observer import MinMaxObserver, MovingAverageMinMaxObserver
@@ -193,10 +194,12 @@ def calibrate_model(model, calibration_loader, num_samples=100):
     # Run calibration
     count = 0
     with torch.no_grad():
-        for batch_idx, (lr, hr, _) in enumerate(calibration_loader):
+        for batch_idx, batch in enumerate(calibration_loader):
             if count >= num_samples:
                 break
-            
+
+            # Support datasets that return (lr, hr, filename, ...) or similar
+            lr = batch[0] if isinstance(batch, (list, tuple)) else batch
             # Move to same device as model
             lr = lr.to(device)
             
@@ -394,3 +397,111 @@ def get_model_size(model, quantized=False):
     
     total_size = (param_size + buffer_size) / (1024 * 1024)  # Convert to MB
     return total_size
+
+class QuantizedLinearInt4(nn.Module):
+    def __init__(self, linear):
+        super().__init__()
+        self.in_features = linear.in_features
+        self.out_features = linear.out_features
+        self.bias = linear.bias
+        self.weight_shape = linear.weight.shape
+        self.weight_numel = linear.weight.numel()
+        self._quantize_weight(linear.weight)
+
+    def _quantize_weight(self, weight):
+        weight_f = weight.detach().float()
+        max_abs = weight_f.abs().max()
+        scale = max_abs / 7.0 if max_abs > 0 else torch.tensor(1.0, device=weight.device)
+        q = torch.clamp((weight_f / scale).round(), -7, 7).to(torch.int8)
+        packed = _pack_int4(q)
+        self.register_buffer('weight_packed', packed)
+        self.register_buffer('weight_scale', scale)
+
+    def _dequant_weight(self):
+        q = _unpack_int4(self.weight_packed, self.weight_numel)
+        weight_f = q.float() * self.weight_scale
+        return weight_f.view(self.weight_shape)
+
+    def forward(self, x):
+        weight_f = self._dequant_weight()
+        return F.linear(x, weight_f, self.bias)
+
+
+class QuantizedConv2dInt4(nn.Module):
+    def __init__(self, conv):
+        super().__init__()
+        self.in_channels = conv.in_channels
+        self.out_channels = conv.out_channels
+        self.kernel_size = conv.kernel_size
+        self.stride = conv.stride
+        self.padding = conv.padding
+        self.dilation = conv.dilation
+        self.groups = conv.groups
+        self.bias = conv.bias
+        self.weight_shape = conv.weight.shape
+        self.weight_numel = conv.weight.numel()
+        self._quantize_weight(conv.weight)
+
+    def _quantize_weight(self, weight):
+        weight_f = weight.detach().float()
+        max_abs = weight_f.abs().max()
+        scale = max_abs / 7.0 if max_abs > 0 else torch.tensor(1.0, device=weight.device)
+        q = torch.clamp((weight_f / scale).round(), -7, 7).to(torch.int8)
+        packed = _pack_int4(q)
+        self.register_buffer('weight_packed', packed)
+        self.register_buffer('weight_scale', scale)
+
+    def _dequant_weight(self):
+        q = _unpack_int4(self.weight_packed, self.weight_numel)
+        weight_f = q.float() * self.weight_scale
+        return weight_f.view(self.weight_shape)
+
+    def forward(self, x):
+        weight_f = self._dequant_weight()
+        return F.conv2d(
+            x,
+            weight_f,
+            bias=self.bias,
+            stride=self.stride,
+            padding=self.padding,
+            dilation=self.dilation,
+            groups=self.groups
+        )
+
+
+def _pack_int4(q):
+    # Pack two signed int4 values into one uint8.
+    q = q.view(-1)
+    if q.numel() % 2 == 1:
+        q = torch.cat([q, q.new_zeros(1)], dim=0)
+    q_u = (q + 8).to(torch.uint8)
+    low = q_u[0::2] & 0x0F
+    high = (q_u[1::2] & 0x0F) << 4
+    return (low | high).contiguous()
+
+
+def _unpack_int4(packed, numel):
+    packed = packed.view(-1)
+    low = packed & 0x0F
+    high = (packed >> 4) & 0x0F
+    q_u = torch.stack([low, high], dim=1).reshape(-1)
+    if q_u.numel() > numel:
+        q_u = q_u[:numel]
+    return (q_u.to(torch.int8) - 8).contiguous()
+
+
+def quantize_model_int4_weight_only(model):
+    """
+    Weight-only INT4 quantization. Activations stay in float.
+    Replaces Conv2d/Linear with INT4-weight wrappers.
+    """
+    for name, module in model.named_children():
+        if isinstance(module, QuantizedConv2dInt4) or isinstance(module, QuantizedLinearInt4):
+            continue
+        if isinstance(module, nn.Conv2d):
+            setattr(model, name, QuantizedConv2dInt4(module))
+        elif isinstance(module, nn.Linear):
+            setattr(model, name, QuantizedLinearInt4(module))
+        else:
+            quantize_model_int4_weight_only(module)
+    return model

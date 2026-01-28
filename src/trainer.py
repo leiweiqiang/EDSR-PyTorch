@@ -24,15 +24,31 @@ class Trainer():
         self.loader_test = loader.loader_test
         self.model = my_model
         self.loss = my_loss
-        self.optimizer = utility.make_optimizer(args, self.model)
+        if self.args.test_only:
+            class _DummyOptimizer:
+                def get_last_epoch(self):
+                    return 0
 
-        if self.args.load != '':
-            self.optimizer.load(ckp.dir, epoch=len(ckp.log))
+                def get_lr(self):
+                    return 0
+
+                def schedule(self):
+                    pass
+
+                def save(self, *args, **kwargs):
+                    pass
+
+            self.optimizer = _DummyOptimizer()
+        else:
+            self.optimizer = utility.make_optimizer(args, self.model)
+
+            if self.args.load != '':
+                self.optimizer.load(ckp.dir, epoch=len(ckp.log))
 
         self.error_last = 1e8
         
         # Handle Post-Training Quantization (PTQ)
-        if self.args.test_only and getattr(self.args, 'quantize', '') == 'ptq' and QUANTIZATION_AVAILABLE:
+        if self.args.test_only and getattr(self.args, 'quantize', '') in ('ptq', 'ptq_int4') and QUANTIZATION_AVAILABLE:
             self.ckp.write_log('Performing Post-Training Quantization...')
             self._perform_ptq()
 
@@ -226,8 +242,12 @@ class Trainer():
         
         calibration_samples = getattr(self.args, 'calibration_samples', 100)
         backend = getattr(self.args, 'quantize_backend', 'fbgemm')
+        quantize_mode = getattr(self.args, 'quantize', 'ptq')
         
-        self.ckp.write_log('Calibrating model with {} samples...'.format(calibration_samples))
+        if quantize_mode == 'ptq':
+            self.ckp.write_log('Calibrating model with {} samples...'.format(calibration_samples))
+        else:
+            self.ckp.write_log('Performing INT4 weight-only quantization...')
         
         # Move model to CPU for quantization (quantization typically works on CPU)
         original_device = next(self.model.model.parameters()).device
@@ -235,17 +255,45 @@ class Trainer():
         
         # Use training loader for calibration if available, otherwise use test loader
         calibration_loader = self.loader_train if self.loader_train else self.loader_test
+        if isinstance(calibration_loader, list):
+            if len(calibration_loader) == 0:
+                self.ckp.write_log('Warning: No calibration data loaders available. Skipping PTQ.')
+                return
+            self.ckp.write_log('Using first test loader for PTQ calibration.')
+            calibration_loader = calibration_loader[0]
         
         # Perform quantization
-        self.model.model = quantization.quantize_model(
-            self.model.model,
-            calibration_loader=calibration_loader,
-            num_samples=calibration_samples,
-            backend=backend
-        )
+        if quantize_mode == 'ptq':
+            self.model.model = quantization.quantize_model(
+                self.model.model,
+                calibration_loader=calibration_loader,
+                num_samples=calibration_samples,
+                backend=backend
+            )
+        else:
+            self.model.model = quantization.quantize_model_int4_weight_only(
+                self.model.model
+            )
         
         self.model.is_quantized = True
         self.ckp.write_log('Post-Training Quantization completed.')
+
+        # Save quantized model artifacts if requested
+        if getattr(self.args, 'save_quantized', False):
+            try:
+                model_dir = self.ckp.get_path('model')
+                quantized_path = os.path.join(model_dir, 'model_ptq_quantized.pt')
+                state_path = os.path.join(model_dir, 'model_ptq.pt')
+                quantization.save_quantized_model(
+                    self.model.model,
+                    quantized_path,
+                    use_torchscript=True
+                )
+                torch.save(self.model.model.state_dict(), state_path)
+                self.ckp.write_log('Saved PTQ quantized model to {}'.format(quantized_path))
+                self.ckp.write_log('Saved PTQ state_dict to {}'.format(state_path))
+            except Exception as e:
+                self.ckp.write_log('Warning: Failed to save PTQ quantized model: {}'.format(e))
         
         # Log model size comparison
         try:
