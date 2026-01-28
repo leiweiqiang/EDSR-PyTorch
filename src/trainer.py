@@ -8,6 +8,12 @@ import torch
 import torch.nn.utils as utils
 from tqdm import tqdm
 
+try:
+    import quantization
+    QUANTIZATION_AVAILABLE = True
+except ImportError:
+    QUANTIZATION_AVAILABLE = False
+
 class Trainer():
     def __init__(self, args, loader, my_model, my_loss, ckp):
         self.args = args
@@ -24,6 +30,11 @@ class Trainer():
             self.optimizer.load(ckp.dir, epoch=len(ckp.log))
 
         self.error_last = 1e8
+        
+        # Handle Post-Training Quantization (PTQ)
+        if self.args.test_only and getattr(self.args, 'quantize', '') == 'ptq' and QUANTIZATION_AVAILABLE:
+            self.ckp.write_log('Performing Post-Training Quantization...')
+            self._perform_ptq()
 
     def train(self):
         self.loss.step()
@@ -34,7 +45,15 @@ class Trainer():
             '[Epoch {}]\tLearning rate: {:.2e}'.format(epoch, Decimal(lr))
         )
         self.loss.start_log()
+        
+        # For QAT, model should be in train mode
+        # For regular training, also use train mode
         self.model.train()
+        
+        # If QAT is enabled, ensure model is prepared
+        if getattr(self.args, 'quantize', '') == 'qat' and QUANTIZATION_AVAILABLE:
+            if not self.model.is_qat_prepared:
+                self.model.prepare_for_qat()
 
         timer_data, timer_model = utility.timer(), utility.timer()
         # TEMP
@@ -75,6 +94,15 @@ class Trainer():
         torch.set_grad_enabled(False)
 
         epoch = self.optimizer.get_last_epoch()
+        
+        # Convert QAT model to quantized model if training is complete
+        if (getattr(self.args, 'quantize', '') == 'qat' and 
+            QUANTIZATION_AVAILABLE and 
+            self.model.is_qat_prepared and 
+            not self.model.is_quantized):
+            self.ckp.write_log('Converting QAT model to quantized model...')
+            self.model.convert_to_quantized()
+        
         self.ckp.write_log('\nEvaluation:')
         self.ckp.add_log(
             torch.zeros(1, len(self.loader_test), len(self.scale))
@@ -151,4 +179,46 @@ class Trainer():
         else:
             epoch = self.optimizer.get_last_epoch() + 1
             return epoch >= self.args.epochs
+    
+    def _perform_ptq(self):
+        """
+        Perform Post-Training Quantization (PTQ).
+        """
+        if not QUANTIZATION_AVAILABLE:
+            self.ckp.write_log('Warning: Quantization module not available. Skipping PTQ.')
+            return
+        
+        calibration_samples = getattr(self.args, 'calibration_samples', 100)
+        backend = getattr(self.args, 'quantize_backend', 'fbgemm')
+        
+        self.ckp.write_log('Calibrating model with {} samples...'.format(calibration_samples))
+        
+        # Move model to CPU for quantization (quantization typically works on CPU)
+        original_device = next(self.model.model.parameters()).device
+        self.model.model = self.model.model.cpu()
+        
+        # Use training loader for calibration if available, otherwise use test loader
+        calibration_loader = self.loader_train if self.loader_train else self.loader_test
+        
+        # Perform quantization
+        self.model.model = quantization.quantize_model(
+            self.model.model,
+            calibration_loader=calibration_loader,
+            num_samples=calibration_samples,
+            backend=backend
+        )
+        
+        self.model.is_quantized = True
+        self.ckp.write_log('Post-Training Quantization completed.')
+        
+        # Log model size comparison
+        try:
+            original_size = quantization.get_model_size(self.model.model, quantized=False)
+            quantized_size = quantization.get_model_size(self.model.model, quantized=True)
+            compression_ratio = original_size / quantized_size if quantized_size > 0 else 0
+            self.ckp.write_log('Model size: {:.2f} MB -> {:.2f} MB (compression: {:.2f}x)'.format(
+                original_size, quantized_size, compression_ratio
+            ))
+        except Exception as e:
+            self.ckp.write_log('Warning: Could not calculate model size: {}'.format(e))
 

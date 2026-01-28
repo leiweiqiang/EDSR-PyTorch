@@ -68,6 +68,18 @@ parser.add_argument('--precision', type=str, default='single',
                     choices=('single', 'half'),
                     help='FP precision for test (single | half)')
 
+# Quantization specifications
+parser.add_argument('--quantize', type=str, default='',
+                    choices=('', 'qat', 'ptq'),
+                    help='Enable quantization: qat (Quantization-Aware Training) or ptq (Post-Training Quantization)')
+parser.add_argument('--quantize_backend', type=str, default='fbgemm',
+                    choices=('fbgemm', 'qnnpack'),
+                    help='Quantization backend (fbgemm for CPU, qnnpack for mobile)')
+parser.add_argument('--calibration_samples', type=int, default=100,
+                    help='Number of samples for PTQ calibration')
+parser.add_argument('--save_quantized', action='store_true',
+                    help='Save quantized model after quantization')
+
 # Option for Residual dense network (RDN)
 parser.add_argument('--G0', type=int, default=64,
                     help='default number of filters. (Use in RDN)')

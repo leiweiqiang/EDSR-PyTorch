@@ -237,3 +237,94 @@ def make_optimizer(args, target):
     optimizer._register_scheduler(scheduler_class, **kwargs_scheduler)
     return optimizer
 
+def get_model_size_mb(model, quantized=False):
+    """
+    Calculate model size in MB.
+    
+    Args:
+        model: The model
+        quantized: Whether the model is quantized (INT8)
+    
+    Returns:
+        Model size in MB
+    """
+    param_size = 0
+    buffer_size = 0
+    
+    for param in model.parameters():
+        if quantized:
+            # Quantized models use INT8 (1 byte per parameter)
+            param_size += param.numel() * 1
+        else:
+            # FP32 models use 4 bytes per parameter
+            param_size += param.numel() * 4
+    
+    for buffer in model.buffers():
+        buffer_size += buffer.numel() * 4
+    
+    total_size = (param_size + buffer_size) / (1024 * 1024)  # Convert to MB
+    return total_size
+
+def log_quantization_info(ckp, model, quantized=False):
+    """
+    Log quantization-related information.
+    
+    Args:
+        ckp: Checkpoint object for logging
+        model: The model
+        quantized: Whether the model is quantized
+    """
+    try:
+        import quantization
+        model_size = quantization.get_model_size(model, quantized=quantized)
+        ckp.write_log('Model size: {:.2f} MB ({})'.format(
+            model_size, 'INT8 quantized' if quantized else 'FP32'
+        ))
+    except ImportError:
+        # Fallback to utility function
+        model_size = get_model_size_mb(model, quantized=quantized)
+        ckp.write_log('Model size: {:.2f} MB ({})'.format(
+            model_size, 'INT8 quantized' if quantized else 'FP32'
+        ))
+    except Exception as e:
+        ckp.write_log('Warning: Could not calculate model size: {}'.format(e))
+
+def compare_model_sizes(original_model, quantized_model, ckp=None):
+    """
+    Compare sizes of original and quantized models.
+    
+    Args:
+        original_model: Original FP32 model
+        quantized_model: Quantized INT8 model
+        ckp: Optional checkpoint object for logging
+    
+    Returns:
+        Dictionary with size information
+    """
+    try:
+        import quantization
+        original_size = quantization.get_model_size(original_model, quantized=False)
+        quantized_size = quantization.get_model_size(quantized_model, quantized=True)
+    except ImportError:
+        original_size = get_model_size_mb(original_model, quantized=False)
+        quantized_size = get_model_size_mb(quantized_model, quantized=True)
+    
+    compression_ratio = original_size / quantized_size if quantized_size > 0 else 0
+    size_reduction = ((original_size - quantized_size) / original_size * 100) if original_size > 0 else 0
+    
+    info = {
+        'original_size_mb': original_size,
+        'quantized_size_mb': quantized_size,
+        'compression_ratio': compression_ratio,
+        'size_reduction_percent': size_reduction
+    }
+    
+    if ckp:
+        ckp.write_log('Model Size Comparison:')
+        ckp.write_log('  Original (FP32): {:.2f} MB'.format(original_size))
+        ckp.write_log('  Quantized (INT8): {:.2f} MB'.format(quantized_size))
+        ckp.write_log('  Compression ratio: {:.2f}x'.format(compression_ratio))
+        ckp.write_log('  Size reduction: {:.1f}%'.format(size_reduction))
+    
+    return info
+

@@ -6,6 +6,12 @@ import torch.nn as nn
 import torch.nn.parallel as P
 import torch.utils.model_zoo
 
+try:
+    import quantization
+    QUANTIZATION_AVAILABLE = True
+except ImportError:
+    QUANTIZATION_AVAILABLE = False
+
 class Model(nn.Module):
     def __init__(self, args, ckp):
         super(Model, self).__init__()
@@ -30,6 +36,13 @@ class Model(nn.Module):
 
         self.n_GPUs = args.n_GPUs
         self.save_models = args.save_models
+        
+        # Quantization settings
+        self.quantize = getattr(args, 'quantize', '')
+        self.quantize_backend = getattr(args, 'quantize_backend', 'fbgemm')
+        self.save_quantized = getattr(args, 'save_quantized', False)
+        self.is_quantized = False
+        self.is_qat_prepared = False
 
         module = import_module('model.' + args.model.lower())
         self.model = module.make_model(args).to(self.device)
@@ -42,6 +55,14 @@ class Model(nn.Module):
             resume=args.resume,
             cpu=args.cpu
         )
+        
+        # Prepare for quantization if needed
+        if self.quantize == 'qat' and QUANTIZATION_AVAILABLE:
+            self.prepare_for_qat()
+        elif self.quantize == 'ptq' and QUANTIZATION_AVAILABLE:
+            # PTQ will be done after calibration in trainer
+            pass
+        
         print(self.model, file=ckp.log_file)
 
     def forward(self, x, idx_scale):
@@ -76,7 +97,14 @@ class Model(nn.Module):
             )
 
         for s in save_dirs:
-            torch.save(self.model.state_dict(), s)
+            if self.is_quantized and self.save_quantized and QUANTIZATION_AVAILABLE:
+                # Save quantized model as TorchScript
+                quantized_path = s.replace('.pt', '_quantized.pt')
+                quantization.save_quantized_model(self.model, quantized_path, use_torchscript=True)
+                # Also save state_dict for compatibility
+                torch.save(self.model.state_dict(), s)
+            else:
+                torch.save(self.model.state_dict(), s)
 
     def load(self, apath, pre_train='', resume=-1, cpu=False):
         load_from = None
@@ -85,6 +113,25 @@ class Model(nn.Module):
             kwargs = {'map_location': lambda storage, loc: storage}
         else:
             kwargs = {'map_location': self.device}
+
+        # Check if loading quantized model
+        quantized_path = None
+        if resume == 0 and pre_train:
+            # Check for quantized model
+            if pre_train.endswith('_quantized.pt'):
+                quantized_path = pre_train
+            elif os.path.exists(pre_train.replace('.pt', '_quantized.pt')):
+                quantized_path = pre_train.replace('.pt', '_quantized.pt')
+
+        if quantized_path and QUANTIZATION_AVAILABLE:
+            print('Load quantized model from {}'.format(quantized_path))
+            try:
+                self.model = quantization.load_quantized_model(self.model, quantized_path, use_torchscript=True)
+                self.is_quantized = True
+                return
+            except Exception as e:
+                print('Warning: Failed to load quantized model: {}'.format(e))
+                print('Falling back to regular model loading...')
 
         if resume == -1:
             load_from = torch.load(
@@ -218,3 +265,40 @@ class Model(nn.Module):
         if len(y) == 1: y = y[0]
 
         return y
+    
+    def prepare_for_qat(self):
+        """
+        Prepare model for Quantization-Aware Training (QAT).
+        """
+        if not QUANTIZATION_AVAILABLE:
+            print('Warning: Quantization module not available. Skipping QAT preparation.')
+            return
+        
+        if self.is_qat_prepared:
+            return
+        
+        print('Preparing model for Quantization-Aware Training...')
+        self.model = quantization.prepare_qat_model(self.model, backend=self.quantize_backend)
+        self.is_qat_prepared = True
+        print('Model prepared for QAT.')
+    
+    def convert_to_quantized(self):
+        """
+        Convert QAT-prepared model to quantized model.
+        """
+        if not QUANTIZATION_AVAILABLE:
+            print('Warning: Quantization module not available. Cannot convert to quantized model.')
+            return
+        
+        if self.is_quantized:
+            return
+        
+        if not self.is_qat_prepared:
+            print('Warning: Model not prepared for QAT. Cannot convert to quantized model.')
+            return
+        
+        print('Converting model to quantized INT8 model...')
+        self.model.eval()
+        self.model = quantization.convert_to_quantized(self.model)
+        self.is_quantized = True
+        print('Model converted to quantized INT8.')
