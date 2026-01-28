@@ -52,9 +52,19 @@ class ResBlock(nn.Module):
         self.res_scale = res_scale
 
     def forward(self, x):
-        res = self.body(x).mul(self.res_scale)
+        res = self.body(x)
+        if x.is_quantized:
+            res_f = torch.dequantize(res)
+            x_f = torch.dequantize(x)
+            res_f = res_f + x_f
+            return torch.quantize_per_tensor(
+                res_f,
+                scale=x.q_scale(),
+                zero_point=x.q_zero_point(),
+                dtype=x.dtype
+            )
+        res = res.mul(self.res_scale)
         res += x
-
         return res
 
 class Upsampler(nn.Sequential):

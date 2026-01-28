@@ -43,6 +43,11 @@ class Model(nn.Module):
         self.save_quantized = getattr(args, 'save_quantized', False)
         self.is_quantized = False
         self.is_qat_prepared = False
+        
+        # 设置量化后端（必须在模型准备前设置）
+        if self.quantize and QUANTIZATION_AVAILABLE:
+            import torch.backends.quantized as quantized_backends
+            quantized_backends.engine = self.quantize_backend
 
         module = import_module('model.' + args.model.lower())
         self.model = module.make_model(args).to(self.device)
@@ -69,6 +74,12 @@ class Model(nn.Module):
         self.idx_scale = idx_scale
         if hasattr(self.model, 'set_scale'):
             self.model.set_scale(idx_scale)
+
+        # 如果是量化模型，确保量化后端被设置
+        if self.is_quantized and QUANTIZATION_AVAILABLE:
+            import torch.backends.quantized as quantized_backends
+            backend = getattr(self, 'quantize_backend', 'fbgemm')
+            quantized_backends.engine = backend
 
         if self.training:
             if self.n_GPUs > 1:
@@ -299,6 +310,19 @@ class Model(nn.Module):
         
         print('Converting model to quantized INT8 model...')
         self.model.eval()
+        # 量化操作需要在 CPU 上进行
+        original_device = next(self.model.parameters()).device
+        self.model = self.model.cpu()
+        
+        # 确保量化后端被设置
+        import torch.backends.quantized as quantized_backends
+        backend = getattr(self.model, '_quantization_backend', 'fbgemm')
+        quantized_backends.engine = backend
+        print(f'Setting quantization backend to: {backend}')
+        
         self.model = quantization.convert_to_quantized(self.model)
+        # 量化后的模型保持在 CPU 上
+        self.device = torch.device('cpu')
+        self.cpu = True
         self.is_quantized = True
         print('Model converted to quantized INT8.')

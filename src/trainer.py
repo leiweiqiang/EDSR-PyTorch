@@ -95,12 +95,24 @@ class Trainer():
 
         epoch = self.optimizer.get_last_epoch()
         
-        # Convert QAT model to quantized model if training is complete
-        if (getattr(self.args, 'quantize', '') == 'qat' and 
-            QUANTIZATION_AVAILABLE and 
-            self.model.is_qat_prepared and 
-            not self.model.is_quantized):
+        # Convert QAT model to quantized model only for final/test-only eval
+        should_convert = (
+            getattr(self.args, 'quantize', '') == 'qat' and
+            QUANTIZATION_AVAILABLE and
+            self.model.is_qat_prepared and
+            not self.model.is_quantized and
+            (
+                self.args.test_only or
+                (epoch + 1) >= self.args.epochs
+            )
+        )
+        if should_convert:
             self.ckp.write_log('Converting QAT model to quantized model...')
+            # 确保量化后端被设置
+            import torch.backends.quantized as quantized_backends
+            backend = getattr(self.model, 'quantize_backend', 'fbgemm')
+            quantized_backends.engine = backend
+            self.ckp.write_log(f'Setting quantization backend to: {backend}')
             self.model.convert_to_quantized()
         
         self.ckp.write_log('\nEvaluation:')
@@ -111,7 +123,23 @@ class Trainer():
 
         timer_test = utility.timer()
         if self.args.save_results: self.ckp.begin_background()
+        any_eval = False
         for idx_data, d in enumerate(self.loader_test):
+            if len(d) == 0:
+                self.ckp.write_log(
+                    'Warning: empty test set for {} (check --data_range/dir_data)'.format(
+                        d.dataset.name
+                    )
+                )
+                self.ckp.write_log(
+                    'Debug: dir_data={}, data_range={}, ext={}, data_test={}'.format(
+                        self.args.dir_data,
+                        self.args.data_range,
+                        self.args.ext,
+                        self.args.data_test
+                    )
+                )
+                continue
             for idx_scale, scale in enumerate(self.scale):
                 d.dataset.set_scale(idx_scale)
                 for lr, hr, filename in tqdm(d, ncols=80):
@@ -130,6 +158,7 @@ class Trainer():
                         self.ckp.save_results(d, filename[0], save_list, scale)
 
                 self.ckp.log[-1, idx_data, idx_scale] /= len(d)
+                any_eval = True
                 best = self.ckp.log.max(0)
                 self.ckp.write_log(
                     '[{} x{}]\tPSNR: {:.3f} (Best: {:.3f} @epoch {})'.format(
@@ -148,7 +177,11 @@ class Trainer():
             self.ckp.end_background()
 
         if not self.args.test_only:
-            self.ckp.save(self, epoch, is_best=(best[1][0, 0] + 1 == epoch))
+            if any_eval:
+                self.ckp.save(self, epoch, is_best=(best[1][0, 0] + 1 == epoch))
+            else:
+                self.ckp.write_log('Warning: no evaluation performed; skipping best-model check')
+                self.ckp.save(self, epoch, is_best=False)
 
         self.ckp.write_log(
             'Total: {:.2f}s\n'.format(timer_test.toc()), refresh=True
@@ -157,7 +190,10 @@ class Trainer():
         torch.set_grad_enabled(True)
 
     def prepare(self, *args):
-        if self.args.cpu:
+        # 量化模型必须在 CPU 上运行
+        if getattr(self.model, 'is_quantized', False):
+            device = torch.device('cpu')
+        elif self.args.cpu:
             device = torch.device('cpu')
         else:
             if torch.backends.mps.is_available():

@@ -8,6 +8,14 @@ from option import args
 from trainer import Trainer
 
 torch.manual_seed(args.seed)
+
+# 设置量化后端（必须在模型创建前设置）
+if getattr(args, 'quantize', ''):
+    import torch.backends.quantized as quantized_backends
+    backend = getattr(args, 'quantize_backend', 'fbgemm')
+    quantized_backends.engine = backend
+    print(f'Setting quantization backend to: {backend}')
+
 checkpoint = utility.checkpoint(args)
 
 def main():

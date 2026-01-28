@@ -32,17 +32,25 @@ DATA_TRAIN="DIV2K"
 # 测试数据集名称
 DATA_TEST="DIV2K"
 
-# 训练/测试数据范围 (DIV2K: 1-800训练, 801-810测试)
+# 训练/测试数据范围 (DIV2K: 1-800训练, 801-900测试)
 DATA_RANGE="1-800/801-810"
 
-# 数据格式 (sep_reset: 首次运行预处理, sep: 使用预处理后的数据)
+# 数据格式 (sep_reset: 生成bin, sep: 使用bin, img: 直接读png)
+# 若测试集为空，先用 PREPARE_BIN=1 生成完整 bin，再用 sep
 DATA_EXT="sep"
+
+# 预处理开关：1 = 先生成 bin，0 = 直接训练
+PREPARE_BIN=0
+
+if [ "${PREPARE_BIN}" -eq 1 ]; then
+    DATA_EXT="sep_reset"
+fi
 
 # 量化后端 (fbgemm: CPU, qnnpack: 移动端)
 QUANTIZE_BACKEND="fbgemm"
 
 # 训练轮数（QAT 通常需要较少的轮数）
-EPOCHS=300
+EPOCHS=3
 
 # 批次大小（根据GPU内存调整）
 BATCH_SIZE=16

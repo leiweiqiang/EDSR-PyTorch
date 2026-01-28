@@ -1,5 +1,6 @@
 from model import common
 
+import torch
 import torch.nn as nn
 
 url = {
@@ -57,7 +58,17 @@ class EDSR(nn.Module):
         x = self.head(x)
 
         res = self.body(x)
-        res += x
+        if x.is_quantized:
+            res_f = torch.dequantize(res)
+            x_f = torch.dequantize(x)
+            res = torch.quantize_per_tensor(
+                res_f + x_f,
+                scale=x.q_scale(),
+                zero_point=x.q_zero_point(),
+                dtype=x.dtype
+            )
+        else:
+            res += x
 
         x = self.tail(res)
         x = self.add_mean(x)

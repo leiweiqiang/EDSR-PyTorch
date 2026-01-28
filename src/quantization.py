@@ -6,7 +6,48 @@ Supports both Post-Training Quantization (PTQ) and Quantization-Aware Training (
 import torch
 import torch.nn as nn
 import torch.ao.quantization as quantization
+from torch.ao.quantization import QConfig, QuantStub, DeQuantStub
+from torch.ao.quantization.observer import MinMaxObserver, MovingAverageMinMaxObserver
 from tqdm import tqdm
+
+class QuantWrapper(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.quant = QuantStub()
+        self.dequant = DeQuantStub()
+        self.model = model
+
+    def forward(self, x):
+        # 若模型含有 float 的 mean shift，则在量化前后处理
+        if hasattr(self.model, '_float_sub_mean') and self.model._float_sub_mean is not None:
+            x = self.model._float_sub_mean(x)
+        x = self.quant(x)
+        x = self.model(x)
+        x = self.dequant(x)
+        if hasattr(self.model, '_float_add_mean') and self.model._float_add_mean is not None:
+            x = self.model._float_add_mean(x)
+        return x
+
+    def set_scale(self, scale):
+        if hasattr(self.model, 'set_scale'):
+            self.model.set_scale(scale)
+
+def _wrap_model_for_quantization(model):
+    if isinstance(model, QuantWrapper):
+        return model
+    # Strip mean-shift layers out of quantized path
+    if hasattr(model, 'sub_mean') and hasattr(model, 'add_mean'):
+        if not hasattr(model, '_float_sub_mean'):
+            model._float_sub_mean = model.sub_mean
+            model.sub_mean = nn.Identity()
+        if not hasattr(model, '_float_add_mean'):
+            model._float_add_mean = model.add_mean
+            model.add_mean = nn.Identity()
+    # Quantized tensors do not support res_scale mul; neutralize it
+    for module in model.modules():
+        if hasattr(module, 'res_scale') and module.res_scale != 1:
+            module.res_scale = 1
+    return QuantWrapper(model)
 
 def get_qconfig(backend='fbgemm'):
     """
@@ -17,9 +58,29 @@ def get_qconfig(backend='fbgemm'):
     
     Returns:
         QConfig object
+    
+    Note:
+        fbgemm backend only supports per_tensor_affine quantization scheme,
+        not per_channel_affine. This function ensures per_tensor_affine is used.
     """
     if backend == 'fbgemm':
-        return quantization.get_default_qconfig('fbgemm')
+        # fbgemm backend only supports per_tensor_affine, not per_channel_affine
+        # Create qconfig with per_tensor quantization scheme
+        activation_observer = MovingAverageMinMaxObserver.with_args(
+            dtype=torch.quint8,
+            qscheme=torch.per_tensor_affine,
+            reduce_range=True
+        )
+        weight_observer = MinMaxObserver.with_args(
+            dtype=torch.qint8,
+            qscheme=torch.per_tensor_affine,
+            reduce_range=True
+        )
+        qconfig = QConfig(
+            activation=activation_observer,
+            weight=weight_observer
+        )
+        return qconfig
     elif backend == 'qnnpack':
         return quantization.get_default_qconfig('qnnpack')
     else:
@@ -87,8 +148,14 @@ def prepare_model_for_quantization(model, backend='fbgemm'):
     Returns:
         Prepared model
     """
+    model = _wrap_model_for_quantization(model)
     # Set quantization config
     qconfig = get_qconfig(backend)
+    
+    # 设置量化后端
+    import torch.backends.quantized as quantized_backends
+    quantized_backends.engine = backend
+    model._quantization_backend = backend
     
     # Set qconfig for all modules
     model.qconfig = qconfig
@@ -151,6 +218,27 @@ def convert_to_quantized(model):
         Quantized model
     """
     model.eval()
+    
+    # 设置量化后端（必须在转换前设置）
+    import torch.backends.quantized as quantized_backends
+    backend = getattr(model, '_quantization_backend', 'fbgemm')
+    quantized_backends.engine = backend
+    
+    # Quantized tensors don't support res_scale mul; neutralize it
+    for module in model.modules():
+        if hasattr(module, 'res_scale') and module.res_scale != 1:
+            module.res_scale = 1
+
+    # 确保模型的所有 Conv2d/Linear 都使用 per_tensor_affine
+    if backend == 'fbgemm':
+        qconfig = get_qconfig('fbgemm')
+        # 重新设置所有模块的 qconfig
+        model.qconfig = qconfig
+        for module in model.modules():
+            if isinstance(module, (nn.Conv2d, nn.Linear)):
+                module.qconfig = qconfig
+
+    # 直接转换整个模型（包括 QuantWrapper），确保输入量化 stub 被正确转换
     quantized_model = quantization.convert(model, inplace=False)
     return quantized_model
 
@@ -198,8 +286,14 @@ def prepare_qat_model(model, backend='fbgemm'):
     Returns:
         QAT-prepared model
     """
+    model = _wrap_model_for_quantization(model)
     # Set quantization config
     qconfig = get_qconfig(backend)
+    
+    # 设置量化后端
+    import torch.backends.quantized as quantized_backends
+    quantized_backends.engine = backend
+    model._quantization_backend = backend
     
     # Set qconfig for all modules
     model.qconfig = qconfig
@@ -215,6 +309,9 @@ def prepare_qat_model(model, backend='fbgemm'):
     # Prepare for QAT
     model.train()
     qat_model = quantization.prepare_qat(model, inplace=False)
+    
+    # 确保 backend 信息被传递
+    qat_model._quantization_backend = backend
     
     return qat_model
 

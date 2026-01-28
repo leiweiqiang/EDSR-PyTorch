@@ -19,14 +19,25 @@ class DIV2K(srdata.SRData):
 
     def _scan(self):
         names_hr, names_lr = super(DIV2K, self)._scan()
-        names_hr = names_hr[self.begin - 1:self.end]
-        names_lr = [n[self.begin - 1:self.end] for n in names_lr]
+        if self.train:
+            names_hr = names_hr[self.begin - 1:self.end]
+            names_lr = [n[self.begin - 1:self.end] for n in names_lr]
+        else:
+            # Validation files are 0801-0900; list indices start at 0
+            start_idx = 0
+            end_idx = self.end - self.begin + 1
+            names_hr = names_hr[start_idx:end_idx]
+            names_lr = [n[start_idx:end_idx] for n in names_lr]
 
         return names_hr, names_lr
 
     def _set_filesystem(self, dir_data):
         super(DIV2K, self)._set_filesystem(dir_data)
-        self.dir_hr = os.path.join(self.apath, 'DIV2K_train_HR')
-        self.dir_lr = os.path.join(self.apath, 'DIV2K_train_LR_bicubic')
+        if self.train:
+            self.dir_hr = os.path.join(self.apath, 'DIV2K_train_HR')
+            self.dir_lr = os.path.join(self.apath, 'DIV2K_train_LR_bicubic')
+        else:
+            self.dir_hr = os.path.join(self.apath, 'DIV2K_valid_HR')
+            self.dir_lr = os.path.join(self.apath, 'DIV2K_valid_LR_bicubic')
         if self.input_large: self.dir_lr += 'L'
 
